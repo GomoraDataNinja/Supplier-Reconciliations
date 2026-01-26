@@ -12,6 +12,78 @@ from copy import copy as pycopy
 st.set_page_config(page_title="Recon App", layout="wide")
 
 
+# =========================
+# Presets (company-friendly)
+# =========================
+PRESETS = {
+    "Generic (Statement)": {
+        "mode": "statement",
+        "statement_layout": "debit_credit",  # debit_credit | amount_only
+        "stmt_keywords": {
+            "ref": ["reference", "ref", "transaction ref", "document", "doc", "inv", "invoice"],
+            "date": ["date", "posting", "document date", "txn date"],
+            "debit": ["debit", "dr"],
+            "credit": ["credit", "cr"],
+            "amount": ["amount", "value", "total"],
+            "desc": ["description", "details", "narration", "particulars"],
+            "balance": ["balance", "running balance"]
+        },
+        "ledger_keywords": {
+            "external": ["external", "external doc", "document no", "doc no", "reference"],
+            "date": ["posting", "date", "document date"],
+            "amount": ["amount", "amt", "value", "lcy", "net"],
+            "desc": ["description", "details", "narration"],
+            "doc_type": ["type", "document type"]
+        },
+        "settings": {
+            "flip_ledger_sign": True,
+            "amount_tolerance": 0.05,
+            "date_window_days": 14,
+            "use_recon_format_layout": True,
+            "template_has_action": True,
+            "left_start_cell": "B16",
+            "right_start_cell": "H16",
+            "supplier_name": "SUPPLIER"
+        }
+    },
+    "Generic (Invoice List)": {
+        "mode": "invoice",
+        "supplier_keywords": {
+            "invoice": ["invoice", "vendor invoice", "inv", "bill", "reference"],
+            "date": ["date", "posting", "document date"],
+            "amount": ["amount", "amt", "value", "total", "net"],
+            "desc": ["description", "details", "narration", "particulars"]
+        },
+        "ledger_keywords": {
+            "external": ["external", "external doc", "document no", "doc no", "reference"],
+            "date": ["posting", "date", "document date"],
+            "amount": ["amount", "amt", "value", "lcy", "net"],
+            "desc": ["description", "details", "narration"],
+            "doc_type": ["type", "document type"]
+        },
+        "settings": {
+            "flip_ledger_sign": True,
+            "amount_tolerance": 0.05,
+            "date_window_days": 14,
+            "use_recon_format_layout": False,
+            "template_has_action": True,
+            "left_start_cell": "B16",
+            "right_start_cell": "H16",
+            "supplier_name": "SUPPLIER"
+        }
+    },
+}
+
+
+# =========================
+# Helpers
+# =========================
+def reset_file(f):
+    try:
+        f.seek(0)
+    except Exception:
+        pass
+
 def to_str(x):
     if pd.isna(x):
         return ""
@@ -69,7 +141,6 @@ def normalize_text(s: str) -> str:
     s = s.replace("/", " ").replace("-", " ")
     s = re.sub(r"\s+", " ", s).strip()
     return s
-
 
 def row_non_empty_count(row):
     return int(row.notna().sum())
@@ -135,21 +206,6 @@ def detect_best_table_in_sheet(raw: pd.DataFrame, max_scan_rows: int = 80, sheet
     }
     return best_df, meta
 
-
-def pick_col_by_hint(df: pd.DataFrame, hint: str):
-    hint = (hint or "").strip().lower()
-    if not hint:
-        return ""
-    cols = list(df.columns)
-    hits = [c for c in cols if hint in str(c).lower()]
-    if len(hits) == 1:
-        return hits[0]
-    if len(hits) > 1:
-        lengths = [(c, len(str(c))) for c in hits]
-        lengths.sort(key=lambda x: x[1])
-        return lengths[0][0]
-    return ""
-
 def _is_date_like(x):
     try:
         dt_parse(str(x), fuzzy=True)
@@ -180,7 +236,7 @@ def infer_col_by_type(df: pd.DataFrame, role: str):
                 score += 3
         elif role == "amount":
             score = pct_num * 10 - sparsity * 1
-            if "amount" in header or "amt" in header:
+            if "amount" in header or "amt" in header or "value" in header:
                 score += 3
             if "debit" in header or "credit" in header:
                 score -= 2
@@ -198,7 +254,7 @@ def infer_col_by_type(df: pd.DataFrame, role: str):
                 score += 2
         elif role == "description":
             score = avg_len * 0.8
-            if "desc" in header or "details" in header:
+            if "desc" in header or "details" in header or "narr" in header:
                 score += 3
 
         if score > best_score:
@@ -207,7 +263,36 @@ def infer_col_by_type(df: pd.DataFrame, role: str):
 
     return best_col
 
+def first_matching_col(df: pd.DataFrame, keywords):
+    if df is None or df.empty:
+        return ""
+    if not keywords:
+        return ""
+    cols = list(df.columns)
+    cols_l = [str(c).lower() for c in cols]
+    for kw in keywords:
+        kw = str(kw).strip().lower()
+        if not kw:
+            continue
+        for i, cl in enumerate(cols_l):
+            if kw in cl:
+                return cols[i]
+    return ""
 
+def choose_col(df: pd.DataFrame, chosen: str, role: str, keywords=None):
+    chosen = (chosen or "").strip()
+    if chosen and chosen in df.columns:
+        return chosen
+    by_kw = first_matching_col(df, keywords or [])
+    if by_kw and by_kw in df.columns:
+        return by_kw
+    if role in ["date", "amount", "invoice", "external_doc", "description"]:
+        return infer_col_by_type(df, role)
+    return ""
+
+# =========================
+# Key extraction rules
+# =========================
 AE_TOKEN = re.compile(r"\bAE[A-Z]{0,3}\d{4,}\b", re.IGNORECASE)
 
 def extract_ae_candidates(text: str):
@@ -230,7 +315,6 @@ def ledger_invoice_key(external_doc: str, supplier_invoice_set: set):
             winner = c
     return winner
 
-
 DOCID_TOKEN = re.compile(r"(HREINV|HRECRN)\s*0*([0-9]+)", re.IGNORECASE)
 
 def extract_docid(x):
@@ -247,7 +331,6 @@ def extract_docid(x):
     except Exception:
         return prefix + num.lstrip("0")
 
-
 def classify_ledger_txn(doc_type: str, external_doc: str, desc: str):
     text = f"{doc_type} {external_doc} {desc}".upper()
     if "CREDIT" in text and "MEMO" in text:
@@ -257,11 +340,14 @@ def classify_ledger_txn(doc_type: str, external_doc: str, desc: str):
     return "invoice"
 
 
-def normalize_supplier_sheet(df: pd.DataFrame, sheet_name: str, invoice_hint: str, date_hint: str, amount_hint: str, desc_hint: str):
-    inv_col = pick_col_by_hint(df, invoice_hint) or infer_col_by_type(df, "invoice")
-    date_col = pick_col_by_hint(df, date_hint) or infer_col_by_type(df, "date")
-    amt_col = pick_col_by_hint(df, amount_hint) or infer_col_by_type(df, "amount")
-    desc_col = pick_col_by_hint(df, desc_hint) or infer_col_by_type(df, "description")
+# =========================
+# Normalization
+# =========================
+def normalize_supplier_sheet(df: pd.DataFrame, sheet_name: str, colmap: dict, keywords: dict):
+    inv_col = choose_col(df, colmap.get("invoice", ""), "invoice", keywords.get("invoice"))
+    date_col = choose_col(df, colmap.get("date", ""), "date", keywords.get("date"))
+    amt_col = choose_col(df, colmap.get("amount", ""), "amount", keywords.get("amount"))
+    desc_col = choose_col(df, colmap.get("desc", ""), "description", keywords.get("desc"))
 
     out = pd.DataFrame()
     out["doc_date"] = df[date_col].map(lambda v: to_date(v, dayfirst=False)) if date_col in df.columns else pd.NaT
@@ -278,9 +364,12 @@ def normalize_supplier_sheet(df: pd.DataFrame, sheet_name: str, invoice_hint: st
 
     out = out[out["amount_signed"].notna()]
     out = out.dropna(subset=["doc_date"]).reset_index(drop=True)
-    return out, {"sheet": sheet_name, "inv_col": inv_col, "date_col": date_col, "amt_col": amt_col, "desc_col": desc_col}
 
-def combine_supplier_workbook(uploaded_file, invoice_hint: str, date_hint: str, amount_hint: str, desc_hint: str):
+    used = {"sheet": sheet_name, "inv_col": inv_col, "date_col": date_col, "amt_col": amt_col, "desc_col": desc_col}
+    return out, used
+
+def combine_supplier_workbook(uploaded_file, colmap: dict, keywords: dict, dedupe_on=True):
+    reset_file(uploaded_file)
     xls = pd.ExcelFile(uploaded_file)
     all_norm = []
     audit = []
@@ -296,7 +385,7 @@ def combine_supplier_workbook(uploaded_file, invoice_hint: str, date_hint: str, 
             audit.append({"sheet": sheet, "kept": False, "reason": "too small"})
             continue
 
-        norm, used = normalize_supplier_sheet(df, sheet, invoice_hint, date_hint, amount_hint, desc_hint)
+        norm, used = normalize_supplier_sheet(df, sheet, colmap, keywords)
         if norm.empty:
             audit.append({"sheet": sheet, "kept": False, "reason": "normalized empty"})
             continue
@@ -310,21 +399,25 @@ def combine_supplier_workbook(uploaded_file, invoice_hint: str, date_hint: str, 
 
     combined = pd.concat(all_norm, ignore_index=True)
 
-    combined["dedupe_key"] = (
-        combined["invoice_key"].fillna("") + "|" +
-        combined["doc_date"].dt.strftime("%Y-%m-%d").fillna("") + "|" +
-        combined["amt_r2"].fillna(0).astype(str)
-    )
+    if dedupe_on:
+        combined["dedupe_key"] = (
+            combined["invoice_key"].fillna("") + "|" +
+            combined["doc_date"].dt.strftime("%Y-%m-%d").fillna("") + "|" +
+            combined["amt_r2"].fillna(0).astype(str)
+        )
+        combined = combined.sort_values(["doc_date"]).drop_duplicates("dedupe_key", keep="first").reset_index(drop=True)
 
-    combined = combined.sort_values(["doc_date"]).drop_duplicates("dedupe_key", keep="first").reset_index(drop=True)
     return combined, audit_df
 
-def normalize_ledger(df: pd.DataFrame, external_hint: str, date_hint: str, amount_hint: str, desc_hint: str, doc_type_hint: str, supplier_invoice_set: set, flip_sign: bool):
-    ext_col = pick_col_by_hint(df, external_hint) or infer_col_by_type(df, "external_doc")
-    date_col = pick_col_by_hint(df, date_hint) or infer_col_by_type(df, "date")
-    amt_col = pick_col_by_hint(df, amount_hint) or infer_col_by_type(df, "amount")
-    desc_col = pick_col_by_hint(df, desc_hint) or infer_col_by_type(df, "description")
-    doc_type_col = pick_col_by_hint(df, doc_type_hint)
+def normalize_ledger(df: pd.DataFrame, colmap: dict, keywords: dict, supplier_invoice_set: set, flip_sign: bool):
+    ext_col = choose_col(df, colmap.get("external", ""), "external_doc", keywords.get("external"))
+    date_col = choose_col(df, colmap.get("date", ""), "date", keywords.get("date"))
+    amt_col = choose_col(df, colmap.get("amount", ""), "amount", keywords.get("amount"))
+    desc_col = choose_col(df, colmap.get("desc", ""), "description", keywords.get("desc"))
+
+    doc_type_col = colmap.get("doc_type", "").strip()
+    if not doc_type_col or doc_type_col not in df.columns:
+        doc_type_col = first_matching_col(df, keywords.get("doc_type", []))
 
     out = pd.DataFrame()
     out["doc_date"] = df[date_col].map(lambda v: to_date(v, dayfirst=True)) if date_col in df.columns else pd.NaT
@@ -354,27 +447,40 @@ def normalize_ledger(df: pd.DataFrame, external_hint: str, date_hint: str, amoun
     used = {"ext_col": ext_col, "date_col": date_col, "amt_col": amt_col, "desc_col": desc_col, "doc_type_col": doc_type_col}
     return out, used
 
-
-def normalize_statement_like_supplier(df: pd.DataFrame, sheet_name: str, ref_hint: str, date_hint: str, debit_hint: str, credit_hint: str, desc_hint: str, balance_hint: str):
-    ref_col = pick_col_by_hint(df, ref_hint) or pick_col_by_hint(df, "reference") or pick_col_by_hint(df, "ref") or infer_col_by_type(df, "invoice")
-    date_col = pick_col_by_hint(df, date_hint) or infer_col_by_type(df, "date")
-    debit_col = pick_col_by_hint(df, debit_hint) or pick_col_by_hint(df, "debit")
-    credit_col = pick_col_by_hint(df, credit_hint) or pick_col_by_hint(df, "credit")
-    desc_col = pick_col_by_hint(df, desc_hint) or infer_col_by_type(df, "description")
-    bal_col = pick_col_by_hint(df, balance_hint) or pick_col_by_hint(df, "balance")
+def normalize_statement_like_supplier(df: pd.DataFrame, sheet_name: str, layout: str, colmap: dict, keywords: dict):
+    date_col = choose_col(df, colmap.get("date", ""), "date", keywords.get("date"))
+    ref_col = choose_col(df, colmap.get("ref", ""), "invoice", keywords.get("ref"))
+    desc_col = choose_col(df, colmap.get("desc", ""), "description", keywords.get("desc"))
+    bal_col = colmap.get("balance", "").strip()
+    if not bal_col or bal_col not in df.columns:
+        bal_col = first_matching_col(df, keywords.get("balance", []))
 
     out = pd.DataFrame()
     out["doc_date"] = df[date_col].map(lambda v: to_date(v, dayfirst=False)) if date_col in df.columns else pd.NaT
     out["reference_raw"] = df[ref_col].map(to_str) if ref_col in df.columns else ""
     out["description"] = df[desc_col].map(to_str) if desc_col in df.columns else ""
 
-    debit = df[debit_col].map(to_num) if debit_col and debit_col in df.columns else np.nan
-    credit = df[credit_col].map(to_num) if credit_col and credit_col in df.columns else np.nan
+    if layout == "amount_only":
+        amt_col = choose_col(df, colmap.get("amount", ""), "amount", keywords.get("amount"))
+        amt = df[amt_col].map(to_num) if amt_col in df.columns else np.nan
+        out["amount_signed"] = amt
+    else:
+        debit_col = colmap.get("debit", "").strip()
+        if not debit_col or debit_col not in df.columns:
+            debit_col = first_matching_col(df, keywords.get("debit", []))
 
-    debit = debit.fillna(0) if isinstance(debit, pd.Series) else pd.Series([0] * len(df))
-    credit = credit.fillna(0) if isinstance(credit, pd.Series) else pd.Series([0] * len(df))
+        credit_col = colmap.get("credit", "").strip()
+        if not credit_col or credit_col not in df.columns:
+            credit_col = first_matching_col(df, keywords.get("credit", []))
 
-    out["amount_signed"] = debit - credit
+        debit = df[debit_col].map(to_num) if debit_col and debit_col in df.columns else np.nan
+        credit = df[credit_col].map(to_num) if credit_col and credit_col in df.columns else np.nan
+
+        debit = debit.fillna(0) if isinstance(debit, pd.Series) else pd.Series([0] * len(df))
+        credit = credit.fillna(0) if isinstance(credit, pd.Series) else pd.Series([0] * len(df))
+
+        out["amount_signed"] = debit - credit
+
     out["abs_amount"] = out["amount_signed"].abs()
     out["docid"] = out["reference_raw"].apply(extract_docid)
 
@@ -391,16 +497,19 @@ def normalize_statement_like_supplier(df: pd.DataFrame, sheet_name: str, ref_hin
 
     used = {
         "sheet": sheet_name,
+        "layout": layout,
         "ref_col": ref_col,
         "date_col": date_col,
-        "debit_col": debit_col,
-        "credit_col": credit_col,
+        "debit_col": colmap.get("debit", ""),
+        "credit_col": colmap.get("credit", ""),
+        "amount_col": colmap.get("amount", ""),
         "desc_col": desc_col,
         "balance_col": bal_col,
     }
     return out, used
 
-def combine_statement_workbook(uploaded_file, ref_hint: str, date_hint: str, debit_hint: str, credit_hint: str, desc_hint: str, balance_hint: str):
+def combine_statement_workbook(uploaded_file, layout: str, colmap: dict, keywords: dict):
+    reset_file(uploaded_file)
     xls = pd.ExcelFile(uploaded_file)
     all_norm = []
     audit = []
@@ -416,7 +525,7 @@ def combine_statement_workbook(uploaded_file, ref_hint: str, date_hint: str, deb
             audit.append({"sheet": sheet, "kept": False, "reason": "too small"})
             continue
 
-        norm, used = normalize_statement_like_supplier(df, sheet, ref_hint, date_hint, debit_hint, credit_hint, desc_hint, balance_hint)
+        norm, used = normalize_statement_like_supplier(df, sheet, layout, colmap, keywords)
         if norm.empty:
             audit.append({"sheet": sheet, "kept": False, "reason": "normalized empty"})
             continue
@@ -429,11 +538,13 @@ def combine_statement_workbook(uploaded_file, ref_hint: str, date_hint: str, deb
         return pd.DataFrame(), audit_df
 
     combined = pd.concat(all_norm, ignore_index=True)
-
     combined = combined.dropna(subset=["doc_date"]).reset_index(drop=True)
     return combined, audit_df
 
 
+# =========================
+# Reconciliation
+# =========================
 def reconcile_docid(statement_df: pd.DataFrame, ledger_df: pd.DataFrame, amount_tol: float):
     stx = statement_df.copy()
     ltx = ledger_df.copy()
@@ -527,7 +638,6 @@ def reconcile_docid(statement_df: pd.DataFrame, ledger_df: pd.DataFrame, amount_
         "stmt_only": stmt_only,
         "ledg_only": ledg_only,
     }
-
 
 def mk_detail(srow, lrow, status, method, match_key):
     return {
@@ -660,6 +770,9 @@ def reconcile_invoice_style(supplier: pd.DataFrame, ledger: pd.DataFrame, amount
     }
 
 
+# =========================
+# Export helpers
+# =========================
 def parse_cell(addr: str):
     addr = (addr or "").strip().upper()
     m = re.match(r"^([A-Z]+)(\d+)$", addr)
@@ -725,7 +838,7 @@ def export_pack_recon_format(template_upload, left_df, right_df, stmt_balance, l
     with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
         tmp_path = tmp.name
 
-    template_upload.seek(0)
+    reset_file(template_upload)
     with open(tmp_path, "wb") as f:
         f.write(template_upload.read())
 
@@ -807,7 +920,7 @@ def export_pack_generic(template_upload, results: dict, left_start_cell: str, ri
     with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
         tmp_path = tmp.name
 
-    template_upload.seek(0)
+    reset_file(template_upload)
     with open(tmp_path, "wb") as f:
         f.write(template_upload.read())
 
@@ -843,149 +956,248 @@ def export_pack_generic(template_upload, results: dict, left_start_cell: str, ri
     return tmp_path
 
 
+# =========================
+# UI (simple for company)
+# =========================
 st.title("Lets Reconcile")
 
+colA, colB = st.columns([2, 1])
+with colA:
+    supplier_file = st.file_uploader("Upload Supplier file", type=["xlsx", "xls"])
+    ledger_file = st.file_uploader("Upload Ledger file", type=["xlsx", "xls"])
+    template_file = st.file_uploader("Upload Template", type=["xlsx", "xls"])
+
+with colB:
+    doc_type = st.radio("Document type", ["Statement", "Invoice List"], index=0)
+
+    preset_options = ["Generic (Statement)", "Generic (Invoice List)"]
+    default_preset = "Generic (Statement)" if doc_type == "Statement" else "Generic (Invoice List)"
+    preset_name = st.selectbox("Preset", preset_options, index=preset_options.index(default_preset))
+
+    run_btn = st.button("Run reconciliation", type="primary", use_container_width=True)
+
+preset = PRESETS[preset_name]
+
+# Settings defaults from preset
+settings = preset.get("settings", {})
+flip_ledger_sign_default = bool(settings.get("flip_ledger_sign", True))
+amount_tolerance_default = float(settings.get("amount_tolerance", 0.05))
+date_window_days_default = int(settings.get("date_window_days", 14))
+use_recon_format_layout_default = bool(settings.get("use_recon_format_layout", True))
+template_has_action_default = bool(settings.get("template_has_action", True))
+left_start_cell_default = str(settings.get("left_start_cell", "B16"))
+right_start_cell_default = str(settings.get("right_start_cell", "H16"))
+supplier_name_default = str(settings.get("supplier_name", "SUPPLIER"))
+
+# Advanced mapping (collapsed)
 with st.sidebar:
-    supplier_file = st.file_uploader("Supplier workbook", type=["xlsx", "xls"])
-    ledger_file = st.file_uploader("Ledger workbook", type=["xlsx", "xls"])
-    template_file = st.file_uploader("Recon template", type=["xlsx", "xls"])
+    st.subheader("Advanced")
+    st.caption("Only open this if the preview looks wrong")
 
-    st.subheader("Mode")
-    recon_mode = st.selectbox(
-        "Reconciliation type",
-        [
-            "Supplier Statement (Debit/Credit + HREINV/HRECRN) vs Ledger",
-            "Invoice workbook (invoice key AE...) vs Ledger"
-        ],
-        index=0
-    )
+    flip_ledger_sign = st.checkbox("Flip ledger sign", value=flip_ledger_sign_default)
+    amount_tolerance = st.number_input("Amount tolerance", min_value=0.0, value=amount_tolerance_default, step=0.01)
+    date_window_days = st.number_input("Date window days", min_value=0, value=date_window_days_default, step=1)
 
-    st.subheader("Supplier Statement hints")
-    stmt_ref_hint = st.text_input("Statement reference hint", value="reference")
-    stmt_date_hint = st.text_input("Statement date hint", value="date")
-    stmt_debit_hint = st.text_input("Statement debit hint", value="debit")
-    stmt_credit_hint = st.text_input("Statement credit hint", value="credit")
-    stmt_desc_hint = st.text_input("Statement description hint", value="description")
-    stmt_balance_hint = st.text_input("Statement balance hint", value="balance")
-
-    st.subheader("Invoice workbook hints")
-    st.caption("Only used in Invoice workbook mode")
-    supplier_invoice_hint = st.text_input("Supplier invoice hint", value="invoice")
-    supplier_date_hint = st.text_input("Supplier date hint", value="date")
-    supplier_amount_hint = st.text_input("Supplier amount hint", value="amount")
-    supplier_desc_hint = st.text_input("Supplier description hint", value="desc")
-
-    st.subheader("Ledger hints")
-    ledger_external_hint = st.text_input("Ledger external doc hint", value="external")
-    ledger_date_hint = st.text_input("Ledger posting date hint", value="posting")
-    ledger_amount_hint = st.text_input("Ledger amount hint", value="amount")
-    ledger_desc_hint = st.text_input("Ledger description hint", value="description")
-    ledger_doc_type_hint = st.text_input("Ledger doc type hint", value="type")
-
-    st.subheader("Settings")
-    flip_ledger_sign = st.checkbox("Flip ledger sign", value=True)
-    amount_tolerance = st.number_input("Amount tolerance", min_value=0.0, value=0.05, step=0.01)
-    date_window_days = st.number_input("Date window days", min_value=0, value=14, step=1)
-
-    st.subheader("Export")
-    use_recon_format_layout = st.checkbox("Template is RECON FORMART layout", value=True)
-    supplier_name = st.text_input("Supplier name (for template header)", value="SUPPLIER")
+    use_recon_format_layout = st.checkbox("Template is RECON FORMART layout", value=use_recon_format_layout_default)
+    supplier_name = st.text_input("Supplier name (template header)", value=supplier_name_default)
 
     st.caption("Only used when RECON FORMART layout is off")
-    left_start_cell = st.text_input("Left table start cell", value="B16")
-    right_start_cell = st.text_input("Right table start cell", value="H16")
-    template_has_action = st.checkbox("Template has Action column", value=True)
+    left_start_cell = st.text_input("Left table start cell", value=left_start_cell_default)
+    right_start_cell = st.text_input("Right table start cell", value=right_start_cell_default)
+    template_has_action = st.checkbox("Template has Action column", value=template_has_action_default)
 
-run_btn = st.button("Run reconciliation", type="primary", use_container_width=True)
+    adv_open = st.checkbox("Edit column mapping", value=False)
+
+# Column mapping state
+def mapping_select(label, options, default_val=""):
+    if default_val in options:
+        idx = options.index(default_val)
+    else:
+        idx = 0
+    return st.selectbox(label, options, index=idx)
+
+def load_best_table_from_workbook(uploaded_file, label=""):
+    reset_file(uploaded_file)
+    xls = pd.ExcelFile(uploaded_file)
+    best_df, best_meta = None, None
+    for sheet in xls.sheet_names:
+        raw = pd.read_excel(xls, sheet_name=sheet, header=None, dtype=object)
+        df, meta = detect_best_table_in_sheet(raw, sheet_name=sheet)
+        if df is None:
+            continue
+        if best_df is None or meta["score"] > best_meta["score"]:
+            best_df, best_meta = df, meta
+    return best_df, best_meta
 
 if run_btn:
     if not (supplier_file and ledger_file and template_file):
-        st.error("Upload supplier, ledger, and template files.")
+        st.error("Upload Supplier, Ledger, and Template files.")
         st.stop()
 
-    with st.spinner("Loading ledger workbook..."):
-        xls = pd.ExcelFile(ledger_file)
-        best_df, meta = None, None
-        for sheet in xls.sheet_names:
-            raw = pd.read_excel(xls, sheet_name=sheet, header=None, dtype=object)
-            df, m = detect_best_table_in_sheet(raw, sheet_name=sheet)
-            if df is None:
-                continue
-            if best_df is None or m["score"] > meta["score"]:
-                best_df, meta = df, m
+    # Load ledger best table for preview and mapping options
+    with st.spinner("Detecting ledger table..."):
+        ledger_best_df, ledger_meta = load_best_table_from_workbook(ledger_file, label="ledger")
 
-    if best_df is None:
+    if ledger_best_df is None:
         st.error("No usable ledger table detected.")
         st.stop()
 
-    st.subheader("Ledger detected table preview")
-    st.write(f"Sheet: {meta['sheet_name']}  Header row: {meta['header_row'] + 1}")
-    st.dataframe(best_df.head(50), use_container_width=True)
+    st.subheader("Detected Ledger table")
+    st.write(f"Sheet: {ledger_meta['sheet_name']} | Header row: {ledger_meta['header_row'] + 1}")
+    st.dataframe(ledger_best_df.head(30), use_container_width=True)
 
-    if recon_mode.startswith("Supplier Statement"):
-        with st.spinner("Combining statement sheets and extracting HREINV/HRECRN..."):
+    # Build mapping choices (dropdowns) if advanced is open
+    ledger_cols = ["(auto)"] + list(ledger_best_df.columns)
+
+    if doc_type == "Statement":
+        stmt_layout_default = preset.get("statement_layout", "debit_credit")
+        stmt_layout = stmt_layout_default
+
+        # Try to get a sample statement sheet table to offer dropdown choices
+        with st.spinner("Detecting supplier statement table..."):
+            reset_file(supplier_file)
+            xls_s = pd.ExcelFile(supplier_file)
+            sample_stmt_df = None
+            sample_stmt_meta = None
+            for sh in xls_s.sheet_names:
+                raw = pd.read_excel(xls_s, sheet_name=sh, header=None, dtype=object)
+                df, meta = detect_best_table_in_sheet(raw, sheet_name=sh)
+                if df is None:
+                    continue
+                if sample_stmt_df is None or meta["score"] > sample_stmt_meta["score"]:
+                    sample_stmt_df, sample_stmt_meta = df, meta
+
+        if sample_stmt_df is None:
+            st.error("No usable statement table detected.")
+            st.stop()
+
+        st.subheader("Detected Supplier Statement table")
+        st.write(f"Sheet: {sample_stmt_meta['sheet_name']} | Header row: {sample_stmt_meta['header_row'] + 1}")
+        st.dataframe(sample_stmt_df.head(30), use_container_width=True)
+
+        stmt_cols = ["(auto)"] + list(sample_stmt_df.columns)
+
+        # Defaults driven by preset keywords
+        stmt_kw = preset.get("stmt_keywords", {})
+
+        stmt_auto = {
+            "ref": first_matching_col(sample_stmt_df, stmt_kw.get("ref", [])) or infer_col_by_type(sample_stmt_df, "invoice"),
+            "date": first_matching_col(sample_stmt_df, stmt_kw.get("date", [])) or infer_col_by_type(sample_stmt_df, "date"),
+            "debit": first_matching_col(sample_stmt_df, stmt_kw.get("debit", [])),
+            "credit": first_matching_col(sample_stmt_df, stmt_kw.get("credit", [])),
+            "amount": first_matching_col(sample_stmt_df, stmt_kw.get("amount", [])) or infer_col_by_type(sample_stmt_df, "amount"),
+            "desc": first_matching_col(sample_stmt_df, stmt_kw.get("desc", [])) or infer_col_by_type(sample_stmt_df, "description"),
+            "balance": first_matching_col(sample_stmt_df, stmt_kw.get("balance", [])),
+        }
+
+        led_kw = preset.get("ledger_keywords", {})
+        ledger_auto = {
+            "external": first_matching_col(ledger_best_df, led_kw.get("external", [])) or infer_col_by_type(ledger_best_df, "external_doc"),
+            "date": first_matching_col(ledger_best_df, led_kw.get("date", [])) or infer_col_by_type(ledger_best_df, "date"),
+            "amount": first_matching_col(ledger_best_df, led_kw.get("amount", [])) or infer_col_by_type(ledger_best_df, "amount"),
+            "desc": first_matching_col(ledger_best_df, led_kw.get("desc", [])) or infer_col_by_type(ledger_best_df, "description"),
+            "doc_type": first_matching_col(ledger_best_df, led_kw.get("doc_type", [])),
+        }
+
+        # Advanced mapping UI
+        stmt_colmap = {k: "" for k in ["ref", "date", "debit", "credit", "amount", "desc", "balance"]}
+        ledger_colmap = {k: "" for k in ["external", "date", "amount", "desc", "doc_type"]}
+
+        if adv_open:
+            with st.sidebar:
+                st.divider()
+                st.subheader("Column mapping")
+
+                stmt_layout = st.radio("Statement layout", ["debit_credit", "amount_only"], index=0 if stmt_layout_default == "debit_credit" else 1)
+                st.caption("debit_credit means amount = debit - credit")
+
+                st.write("Statement columns")
+                stmt_colmap["date"] = mapping_select("Statement date", stmt_cols, stmt_auto["date"])
+                stmt_colmap["ref"] = mapping_select("Statement reference", stmt_cols, stmt_auto["ref"])
+                stmt_colmap["desc"] = mapping_select("Statement description", stmt_cols, stmt_auto["desc"])
+                stmt_colmap["balance"] = mapping_select("Statement balance (optional)", stmt_cols, stmt_auto["balance"])
+
+                if stmt_layout == "amount_only":
+                    stmt_colmap["amount"] = mapping_select("Statement amount", stmt_cols, stmt_auto["amount"])
+                else:
+                    stmt_colmap["debit"] = mapping_select("Statement debit", stmt_cols, stmt_auto["debit"])
+                    stmt_colmap["credit"] = mapping_select("Statement credit", stmt_cols, stmt_auto["credit"])
+
+                st.write("Ledger columns")
+                ledger_colmap["date"] = mapping_select("Ledger date", ledger_cols, ledger_auto["date"])
+                ledger_colmap["external"] = mapping_select("Ledger external doc", ledger_cols, ledger_auto["external"])
+                ledger_colmap["amount"] = mapping_select("Ledger amount", ledger_cols, ledger_auto["amount"])
+                ledger_colmap["desc"] = mapping_select("Ledger description", ledger_cols, ledger_auto["desc"])
+                ledger_colmap["doc_type"] = mapping_select("Ledger doc type (optional)", ledger_cols, ledger_auto["doc_type"])
+        else:
+            stmt_colmap = stmt_auto.copy()
+            ledger_colmap = ledger_auto.copy()
+
+        # Clean mapping values
+        for k in stmt_colmap:
+            if stmt_colmap[k] == "(auto)":
+                stmt_colmap[k] = ""
+        for k in ledger_colmap:
+            if ledger_colmap[k] == "(auto)":
+                ledger_colmap[k] = ""
+
+        with st.spinner("Combining statement sheets..."):
             stmt_combined, stmt_audit = combine_statement_workbook(
                 supplier_file,
-                ref_hint=stmt_ref_hint,
-                date_hint=stmt_date_hint,
-                debit_hint=stmt_debit_hint,
-                credit_hint=stmt_credit_hint,
-                desc_hint=stmt_desc_hint,
-                balance_hint=stmt_balance_hint
+                layout=stmt_layout,
+                colmap=stmt_colmap,
+                keywords=stmt_kw
             )
 
         st.subheader("Statement sheet audit")
         st.dataframe(stmt_audit, use_container_width=True)
 
         if stmt_combined.empty:
-            st.error("No usable statement table detected.")
+            st.error("Statement normalization returned no rows. Open Advanced and fix mapping.")
             st.stop()
 
-        st.subheader("Statement combined preview")
-        st.dataframe(stmt_combined.head(80), use_container_width=True)
+        with st.expander("Statement combined preview", expanded=False):
+            st.dataframe(stmt_combined.head(80), use_container_width=True)
 
         supplier_invoice_set = set()
 
-        with st.spinner("Normalizing ledger and extracting HREINV/HRECRN..."):
+        with st.spinner("Normalizing ledger..."):
             ledger_norm, ledger_used = normalize_ledger(
-                best_df,
-                external_hint=ledger_external_hint,
-                date_hint=ledger_date_hint,
-                amount_hint=ledger_amount_hint,
-                desc_hint=ledger_desc_hint,
-                doc_type_hint=ledger_doc_type_hint,
+                ledger_best_df,
+                colmap=ledger_colmap,
+                keywords=led_kw,
                 supplier_invoice_set=supplier_invoice_set,
                 flip_sign=flip_ledger_sign
             )
 
-        st.write("Ledger columns used")
-        st.write(ledger_used)
+        with st.expander("Ledger normalized preview", expanded=False):
+            st.write("Ledger columns used")
+            st.write(ledger_used)
+            st.dataframe(ledger_norm.head(80), use_container_width=True)
 
-        st.subheader("Ledger normalized preview")
-        st.dataframe(ledger_norm.head(80), use_container_width=True)
-
-        with st.spinner("Reconciling by HREINV/HRECRN totals..."):
+        with st.spinner("Reconciling (DocID totals)..."):
             results_docid = reconcile_docid(
                 stmt_combined,
                 ledger_norm,
                 amount_tol=float(amount_tolerance)
             )
 
-        st.subheader("Recon preview")
+        st.subheader("Recon results")
         c1, c2 = st.columns(2)
         with c1:
-            st.write("Left table: ledger missing on statement")
-            st.dataframe(results_docid["left_table"].head(500), use_container_width=True)
+            st.write("Ledger items missing on statement")
+            st.dataframe(results_docid["left_table"].head(300), use_container_width=True)
         with c2:
-            st.write("Right table: statement missing in ledger")
-            st.dataframe(results_docid["right_table"].head(500), use_container_width=True)
+            st.write("Statement items missing in ledger")
+            st.dataframe(results_docid["right_table"].head(300), use_container_width=True)
 
-        st.subheader("Match detail")
-        st.dataframe(results_docid["match_detail"].head(600), use_container_width=True)
+        with st.expander("Match detail", expanded=False):
+            st.dataframe(results_docid["match_detail"].head(800), use_container_width=True)
 
+        # Balances and as-at
         stmt_balance = float(stmt_combined["balance"].dropna().iloc[-1]) if stmt_combined["balance"].dropna().shape[0] else np.nan
-        ledg_bal_col = pick_col_by_hint(best_df, "balance") or pick_col_by_hint(best_df, "balance (lcy)") or ""
-        ledg_balance = float(best_df[ledg_bal_col].map(to_num).dropna().iloc[-1]) if ledg_bal_col and best_df[ledg_bal_col].map(to_num).dropna().shape[0] else np.nan
+        ledg_bal_col = first_matching_col(ledger_best_df, ["balance", "balance (lcy)"])
+        ledg_balance = float(ledger_best_df[ledg_bal_col].map(to_num).dropna().iloc[-1]) if ledg_bal_col and ledger_best_df[ledg_bal_col].map(to_num).dropna().shape[0] else np.nan
 
         stmt_max_date = pd.to_datetime(stmt_combined["doc_date"], errors="coerce").max()
         ledg_max_date = pd.to_datetime(ledger_norm["doc_date"], errors="coerce").max()
@@ -1062,55 +1274,108 @@ if run_btn:
             )
 
     else:
+        # Invoice List flow
+        with st.spinner("Detecting supplier invoice table..."):
+            supplier_best_df, supplier_meta = load_best_table_from_workbook(supplier_file, label="supplier")
+
+        if supplier_best_df is None:
+            st.error("No usable supplier table detected.")
+            st.stop()
+
+        st.subheader("Detected Supplier Invoice table")
+        st.write(f"Sheet: {supplier_meta['sheet_name']} | Header row: {supplier_meta['header_row'] + 1}")
+        st.dataframe(supplier_best_df.head(30), use_container_width=True)
+
+        supplier_cols = ["(auto)"] + list(supplier_best_df.columns)
+
+        sup_kw = preset.get("supplier_keywords", {})
+        sup_auto = {
+            "invoice": first_matching_col(supplier_best_df, sup_kw.get("invoice", [])) or infer_col_by_type(supplier_best_df, "invoice"),
+            "date": first_matching_col(supplier_best_df, sup_kw.get("date", [])) or infer_col_by_type(supplier_best_df, "date"),
+            "amount": first_matching_col(supplier_best_df, sup_kw.get("amount", [])) or infer_col_by_type(supplier_best_df, "amount"),
+            "desc": first_matching_col(supplier_best_df, sup_kw.get("desc", [])) or infer_col_by_type(supplier_best_df, "description"),
+        }
+
+        led_kw = preset.get("ledger_keywords", {})
+        ledger_auto = {
+            "external": first_matching_col(ledger_best_df, led_kw.get("external", [])) or infer_col_by_type(ledger_best_df, "external_doc"),
+            "date": first_matching_col(ledger_best_df, led_kw.get("date", [])) or infer_col_by_type(ledger_best_df, "date"),
+            "amount": first_matching_col(ledger_best_df, led_kw.get("amount", [])) or infer_col_by_type(ledger_best_df, "amount"),
+            "desc": first_matching_col(ledger_best_df, led_kw.get("desc", [])) or infer_col_by_type(ledger_best_df, "description"),
+            "doc_type": first_matching_col(ledger_best_df, led_kw.get("doc_type", [])),
+        }
+
+        supplier_colmap = {k: "" for k in ["invoice", "date", "amount", "desc"]}
+        ledger_colmap = {k: "" for k in ["external", "date", "amount", "desc", "doc_type"]}
+
+        dedupe_on = True
+
+        if adv_open:
+            with st.sidebar:
+                st.divider()
+                st.subheader("Column mapping")
+
+                dedupe_on = st.checkbox("Remove duplicates (invoice + date + amount)", value=True)
+
+                st.write("Supplier columns")
+                supplier_colmap["invoice"] = mapping_select("Supplier invoice", supplier_cols, sup_auto["invoice"])
+                supplier_colmap["date"] = mapping_select("Supplier date", supplier_cols, sup_auto["date"])
+                supplier_colmap["amount"] = mapping_select("Supplier amount", supplier_cols, sup_auto["amount"])
+                supplier_colmap["desc"] = mapping_select("Supplier description", supplier_cols, sup_auto["desc"])
+
+                st.write("Ledger columns")
+                ledger_colmap["date"] = mapping_select("Ledger date", ledger_cols, ledger_auto["date"])
+                ledger_colmap["external"] = mapping_select("Ledger external doc", ledger_cols, ledger_auto["external"])
+                ledger_colmap["amount"] = mapping_select("Ledger amount", ledger_cols, ledger_auto["amount"])
+                ledger_colmap["desc"] = mapping_select("Ledger description", ledger_cols, ledger_auto["desc"])
+                ledger_colmap["doc_type"] = mapping_select("Ledger doc type (optional)", ledger_cols, ledger_auto["doc_type"])
+        else:
+            supplier_colmap = sup_auto.copy()
+            ledger_colmap = ledger_auto.copy()
+
+        for k in supplier_colmap:
+            if supplier_colmap[k] == "(auto)":
+                supplier_colmap[k] = ""
+        for k in ledger_colmap:
+            if ledger_colmap[k] == "(auto)":
+                ledger_colmap[k] = ""
+
         with st.spinner("Combining supplier sheets..."):
             supplier_combined, supplier_audit = combine_supplier_workbook(
                 supplier_file,
-                invoice_hint=supplier_invoice_hint,
-                date_hint=supplier_date_hint,
-                amount_hint=supplier_amount_hint,
-                desc_hint=supplier_desc_hint
+                colmap=supplier_colmap,
+                keywords=sup_kw,
+                dedupe_on=dedupe_on
             )
 
         st.subheader("Supplier sheet audit")
         st.dataframe(supplier_audit, use_container_width=True)
 
         if supplier_combined.empty:
-            st.error("No usable supplier transaction table detected across sheets.")
+            st.error("Supplier normalization returned no rows. Open Advanced and fix mapping.")
             st.stop()
 
-        blank_invoice_pct = float((supplier_combined["invoice_key"].fillna("") == "").mean())
-        st.write(f"Supplier rows: {len(supplier_combined):,}")
-        st.write(f"Supplier invoice_key blank rate: {blank_invoice_pct:.1%}")
+        with st.expander("Supplier combined preview", expanded=False):
+            st.dataframe(supplier_combined.head(60), use_container_width=True)
 
         supplier_invoice_set = set(supplier_combined["invoice_key"].dropna().astype(str).unique().tolist())
         supplier_invoice_set = {x for x in supplier_invoice_set if x}
 
-        st.subheader("Supplier combined preview")
-        st.dataframe(supplier_combined.head(50), use_container_width=True)
-
-        with st.spinner("Normalizing ledger and extracting invoice keys..."):
+        with st.spinner("Normalizing ledger..."):
             ledger_norm, ledger_used = normalize_ledger(
-                best_df,
-                external_hint=ledger_external_hint,
-                date_hint=ledger_date_hint,
-                amount_hint=ledger_amount_hint,
-                desc_hint=ledger_desc_hint,
-                doc_type_hint=ledger_doc_type_hint,
+                ledger_best_df,
+                colmap=ledger_colmap,
+                keywords=led_kw,
                 supplier_invoice_set=supplier_invoice_set,
                 flip_sign=flip_ledger_sign
             )
 
-        st.write("Ledger columns used")
-        st.write(ledger_used)
+        with st.expander("Ledger normalized preview", expanded=False):
+            st.write("Ledger columns used")
+            st.write(ledger_used)
+            st.dataframe(ledger_norm.head(60), use_container_width=True)
 
-        extracted_blank_pct = float((ledger_norm["invoice_key_extracted"].fillna("") == "").mean())
-        st.write(f"Ledger rows: {len(ledger_norm):,}")
-        st.write(f"Ledger invoice_key extracted blank rate: {extracted_blank_pct:.1%}")
-
-        st.subheader("Ledger normalized preview")
-        st.dataframe(ledger_norm.head(50), use_container_width=True)
-
-        with st.spinner("Reconciling..."):
+        with st.spinner("Reconciling (invoice totals + fallback payments)..."):
             results = reconcile_invoice_style(
                 supplier_combined,
                 ledger_norm,
@@ -1118,17 +1383,17 @@ if run_btn:
                 date_window_days=int(date_window_days),
             )
 
-        st.subheader("Recon preview")
+        st.subheader("Recon results")
         c1, c2 = st.columns(2)
         with c1:
-            st.write("Left table: ledger missing on supplier")
-            st.dataframe(results["left_table"].head(200), use_container_width=True)
+            st.write("Ledger items missing on supplier")
+            st.dataframe(results["left_table"].head(300), use_container_width=True)
         with c2:
-            st.write("Right table: supplier missing in ledger")
-            st.dataframe(results["right_table"].head(200), use_container_width=True)
+            st.write("Supplier items missing in ledger")
+            st.dataframe(results["right_table"].head(300), use_container_width=True)
 
-        st.subheader("Match detail")
-        st.dataframe(results["match_detail"].head(400), use_container_width=True)
+        with st.expander("Match detail", expanded=False):
+            st.dataframe(results["match_detail"].head(800), use_container_width=True)
 
         with st.spinner("Writing output workbook..."):
             out_path = export_pack_generic(
